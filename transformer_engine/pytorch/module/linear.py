@@ -36,6 +36,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _distribute_and_save_activations,
+    _gather_distributed_activations,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -83,7 +85,8 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag: bool,
-        ub_name: str
+        ub_name: str,
+        fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -287,14 +290,17 @@ class _Linear(torch.autograd.Function):
                     if saved_inputmat is not None:
                         saved_inputmat.activation_offloading = True
 
-            ctx.save_for_backward(
+            ctx = _distribute_and_save_activations(
+                ctx,
                 saved_inputmat,
                 saved_inputmat_t,
                 weight,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                process_group=fsdp_group,
             )
+
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
@@ -339,7 +345,7 @@ class _Linear(torch.autograd.Function):
                 main_grad,
                 weight_t_fp8,
                 fwd_scale_inverses,
-            ) = ctx.saved_tensors
+            ) = _gather_distributed_activations(ctx)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
@@ -524,6 +530,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -935,6 +942,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_atomic_gemm_rs,
                 self.ub_atomic_gemm_ag,
                 self.ub_name,
+                self.fsdp_group,
             )
             out = linear_fn(*args)
 

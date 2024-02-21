@@ -38,6 +38,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    _distribute_and_save_activations,
+    _gather_distributed_activations,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
@@ -89,6 +91,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_ag: bool,
         ub_name: str,
+        fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -263,7 +266,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma.activation_offloading = True
                 ln_out.activation_offloading = True
 
-            ctx.save_for_backward(
+            ctx = _distribute_and_save_activations(
+                ctx,
                 inputmat,
                 ln_weight,
                 mu,
@@ -273,6 +277,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                process_group=fsdp_group,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -334,7 +339,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_t_fp8,
                 ln_out,
                 fwd_scale_inverses,
-            ) = ctx.saved_tensors
+            ) = _gather_distributed_activations(ctx)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
@@ -1101,6 +1106,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_split_ag,
                 self.ub_atomic_gemm_ag,
                 self.ub_name,
+                self.fsdp_group,
             )
             out = fwd_fn(*args)
 
