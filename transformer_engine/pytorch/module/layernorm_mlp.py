@@ -43,9 +43,9 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    use_reentrant_activation_recompute
-    _distribute_and_save_activations,
-    _gather_distributed_activations,
+    use_reentrant_activation_recompute,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 
 from .. import cpp_extensions as tex
@@ -478,8 +478,24 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out.activation_offloading = True
                 gelu_out.activation_offloading = True
 
-            ctx = _distribute_and_save_activations(
-                ctx,
+            fwd_scale_inverses = fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                inputmat,
+                ln_weight,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight_t_fp8,
+                fc2_weight_t_fp8,
+                fc1_bias,
+                fwd_scale_inverses
+            )
+
+            ctx.save_for_backward(
                 inputmat,
                 ln_weight,
                 mu,
@@ -494,8 +510,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc2_weight_t_fp8,
                 fc1_bias,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
-                process_group=fsdp_group,
+                fwd_scale_inverses
             )
 
             ctx.activation_dtype = activation_dtype
@@ -569,7 +584,23 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fwd_scale_inverses,
-            ) = _gather_distributed_activations(ctx)
+            ) = ctx.saved_tensors
+
+            _fsdp_gather_tensors(
+                ctx.fsdp_group,
+                ctx.fsdp_shapes,
+                inputmat,
+                ln_weight,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight_t_fp8,
+                fc2_weight_t_fp8,
+                fc1_bias,
+                fwd_scale_inverses
+            )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 fc1_weight = Parameter(fc1_weight, False)

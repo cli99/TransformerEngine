@@ -36,8 +36,8 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    _distribute_and_save_activations,
-    _gather_distributed_activations,
+    _fsdp_scatter_tensors,
+    _fsdp_gather_tensors,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -290,15 +290,23 @@ class _Linear(torch.autograd.Function):
                     if saved_inputmat is not None:
                         saved_inputmat.activation_offloading = True
 
-            ctx = _distribute_and_save_activations(
-                ctx,
+            fwd_scale_inverses = fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
+            ctx.fsdp_group = fsdp_group
+            ctx.fsdp_shapes = _fsdp_scatter_tensors(
+                fsdp_group,
+                saved_inputmat,     # None if fp8 == False
+                saved_inputmat_t,   # None if fp8 == False AND in training mode
+                weight_t_fp8 if fp8 else None,
+                fwd_scale_inverses
+            )
+
+            ctx.save_for_backward(
                 saved_inputmat,
                 saved_inputmat_t,
                 weight,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8 if fp8 else None,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
-                process_group=fsdp_group,
+                fwd_scale_inverses
             )
 
             ctx.activation_dtype = activation_dtype
@@ -345,7 +353,14 @@ class _Linear(torch.autograd.Function):
                 main_grad,
                 weight_t_fp8,
                 fwd_scale_inverses,
-            ) = _gather_distributed_activations(ctx)
+            ) = ctx.saved_tensors
+
+            _fsdp_gather_tensors(ctx.fsdp_group,
+                                 ctx.fsdp_shapes,
+                                 inputmat,
+                                 inputmat_t,
+                                 weight_t_fp8,
+                                 fwd_scale_inverses,)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)
