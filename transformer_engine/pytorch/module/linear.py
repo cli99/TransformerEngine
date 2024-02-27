@@ -295,9 +295,9 @@ class _Linear(torch.autograd.Function):
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,     # None if fp8 == False
-                saved_inputmat_t,   # None if fp8 == False AND in training mode
+                saved_inputmat_t,   # None if fp8 == False AND not is_grad_enabled
+                weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8 if fp8 else None,
-                fwd_scale_inverses
             )
 
             ctx.save_for_backward(
@@ -359,8 +359,8 @@ class _Linear(torch.autograd.Function):
                                  ctx.fsdp_shapes,
                                  inputmat,
                                  inputmat_t,
-                                 weight_t_fp8,
-                                 fwd_scale_inverses,)
+                                 main_grad,
+                                 weight_t_fp8)
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 weight = torch.nn.Parameter(weight, False)

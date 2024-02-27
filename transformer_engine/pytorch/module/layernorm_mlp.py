@@ -478,21 +478,16 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out.activation_offloading = True
                 gelu_out.activation_offloading = True
 
-            fwd_scale_inverses = fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
             ctx.fsdp_group = fsdp_group
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
-                inputmat,
-                ln_weight,
                 mu,
                 rsigma,
                 ln_out,
                 fc1_out,
                 gelu_out,
                 fc1_weight_t_fp8,
-                fc2_weight_t_fp8,
-                fc1_bias,
-                fwd_scale_inverses
+                fc2_weight_t_fp8
             )
 
             ctx.save_for_backward(
@@ -510,7 +505,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc2_weight_t_fp8,
                 fc1_bias,
-                fwd_scale_inverses
+                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None
             )
 
             ctx.activation_dtype = activation_dtype
@@ -589,17 +584,13 @@ class _LayerNormMLP(torch.autograd.Function):
             _fsdp_gather_tensors(
                 ctx.fsdp_group,
                 ctx.fsdp_shapes,
-                inputmat,
-                ln_weight,
                 mu,
                 rsigma,
                 ln_out,
                 fc1_out,
                 gelu_out,
                 fc1_weight_t_fp8,
-                fc2_weight_t_fp8,
-                fc1_bias,
-                fwd_scale_inverses
+                fc2_weight_t_fp8
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
